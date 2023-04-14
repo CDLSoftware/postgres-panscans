@@ -12,7 +12,7 @@ else
 fi
 
 export DATE=$(date +%Y%m%d)
-export LOGFILE=${LOGDIR}/pan_running_for_${DATABASE_INSTANCE}_${DATE}.log
+export LOGFILE=${LOGDIR}/pan_running_for_${DATABASE_HOST}_${DATE}.log
 export PGPASSWORD=${DATABASE_PASSWORD}
 
 echo "$(date) Logfile for this run - ${LOGFILE}"
@@ -55,7 +55,7 @@ echo "$(date) PAN run starting..." | tee -a ${LOGFILE}
 echo "$(date) Check table pan_progress for updates on progress" | tee -a ${LOGFILE}
 
 # Running Pan
-psql -q -h ${DATABASE_HOST} -U ${DATABASE_USER} -d ${DATABASE_NAME} -c "call pan_scan_prc('{}','{${DATABASE_SCHEMA}}', 'hits');" >> ${LOGFILE}
+psql -q -h ${DATABASE_HOST} -U ${DATABASE_USER} -d ${DATABASE_NAME} -c "call pan_scan_prc('{}','{${DATABASE_SCHEMA}}', 'hits', '${VERBOSITY}');" >> ${LOGFILE}
 
 echo "$(date) PAN run complete, checking results" | tee -a ${LOGFILE}
 
