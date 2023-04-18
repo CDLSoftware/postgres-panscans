@@ -27,6 +27,7 @@ DECLARE
   col_size int;
   classtype varchar(100);
   cnt int := 0;
+  unq_digs varchar(100);
   verbosity varchar(5) := upper(param_verbose);
 BEGIN
   qry := format('INSERT INTO %s (id, createdatetime, tablename, value, row_id) values (default, now(), ''%s'', ''%s'', null)', progress_table, tablename, 'Pan Scan progress');
@@ -44,7 +45,7 @@ BEGIN
     EXECUTE qry;
     commit;
 
-    query := format('SELECT ctid FROM %I.%I', schemaname, tablename);
+    query := format('SELECT ctid FROM %I.%I AS t WHERE cast(t.* as text) ~ %L', schemaname, tablename, search_re);
     FOR rowctid IN EXECUTE query
     LOOP
       cnt := cnt + 1;
@@ -78,14 +79,29 @@ BEGIN
                     ORDER BY 1
                    )
       LOOP
-	    query := format('SELECT regexp_replace(%I, ''[^0-9]'', '''', ''g'') FROM %I.%I WHERE length(%I)>=16 AND cast(%I as text) ~ %L AND ctid=%L', columnname, schemaname, tablename, columnname, columnname, search_re, rowctid);
+	    query := format('SELECT regexp_replace(%I::text, ''[^0-9]'', '''', ''g'') FROM %I.%I WHERE length(%I::text)>=16 AND %I::text ~ %L AND ctid=%L', columnname, schemaname, tablename, columnname, columnname, search_re, rowctid);
         EXECUTE query INTO pan;
 
-        col_size := char_length(pan)::int;
-        IF (col_size = 16) THEN
+        -- Adding an extra layer of checking against the POSSIBLE POSITIVE to remove some types of FALSE POSITIVES
+        -- If 4 unique digits or less, then classed as FALSE POSITIVE to avoid the below situations
+        -- 1234-1234-1234-1234, 9999-9999-9999-9999, 4444-5555-6666-7777, 1111-2222-1111-2222, 5555555555554444, 5105105105105100, 4111111111111111
+        query := format('select length(string_agg(ccard,''''))::int unq_digs from (select distinct(regexp_split_to_table(''%s'', '''')) ccard order by ccard ) x', pan);
+        EXECUTE query INTO unq_digs;
+
+        IF (unq_digs::int <= 4) THEN
+            classtype := 'FALSE POSITIVE';
+        ELSE
+            col_size := char_length(pan)::int;
+            IF (col_size = 16) THEN
+                classtype := 'POSSIBLE POSITIVE';
+            ELSIF (col_size > 16 AND col_size < 20) THEN
+                classtype := 'MAYBE POSITIVE';
+            ELSE
+                classtype := 'PROBABLY FALSE POSITIVE';
+            END IF;
+
             pk_value := '';
             pk_column := '';
-            classtype := 'POSSIBLE POSITIVE';
 
             -- Getting the PK value to add on the results table
             query := format('SELECT
@@ -108,30 +124,31 @@ BEGIN
             EXECUTE query INTO pk_column;
 
             IF (pk_column = 'no-pk') THEN
-                pk_value := 'no-pk';
+                pk_column := columnname;
+                pk_value := rowctid;
             ELSE
                 query := format('SELECT %s FROM %s.%s WHERE ctid=''%s''', pk_column, schemaname, tablename, rowctid);
                 EXECUTE query INTO pk_value;
             END IF;
 
-            -- Limiting the size of the the row to be inserted on the table
-            -- The quoting removal below looks weird, but works
-            query := format('SELECT replace(left(%s,30), E''\'''', '''') FROM %s.%s WHERE ctid=''%s''', columnname, schemaname, tablename, rowctid);
+            -- Limiting the size of the row to be inserted on the table / The quoting removal below looks weird, but works
+            query := format('SELECT replace(left(%s,50), E''\'''', '''') FROM %s.%s WHERE ctid=''%s''', columnname, schemaname, tablename, rowctid);
             EXECUTE query INTO columnvalue_original;
 
-            query := format('SELECT %s FROM %s.%s WHERE ctid=''''%s'''';', columnname, schemaname, tablename, rowctid);
-            --raise info '%s', query;
-            qry := format('INSERT INTO %s (id, createdatetime, schemaname, tablename, value, pan, row_id, classtype, columnname, pk_column, pk_value, finding_sql) values (default, ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'')', store_table, now(), schemaname, tablename, columnvalue_original, pan, rowctid, classtype, columnname, pk_column, pk_value, query);
+            query := format('SELECT %s FROM %s.%s WHERE %s=''''%s'''';', columnname, schemaname, tablename, pk_column, pk_value);
+            -- We are not allowed to store the PANs anywhere, therefore columns 'columnvalue_original', 'pan' are stored in pure text. If wanted, just remove the quotes and it will store the actual data
+            qry := format('INSERT INTO %s (id, createdatetime, schemaname, tablename, value, pan, row_id, classtype, columnname, pk_column, pk_value, finding_sql)
+                            VALUES (default, ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'', ''%s'')',
+                                    store_table, now(), schemaname, tablename, columnvalue_original, pan, rowctid, classtype, columnname, pk_column, pk_value, query);
             EXECUTE qry;
 
             IF (verbosity = 'Y' OR verbosity = 'YES') THEN
                 raise notice '%', format('Table/column: %s.%s(%s) | Class: %s | row-ctid: %s | Value: %s(%I chr) | Query: %s', schemaname, tablename, columnname, classtype, rowctid, pan, col_size, query);
             END IF;
-        ELSE
-            -- FALSE POSITIVE as over then 16 digits
-            NULL;
-        END IF;
-      END LOOP; -- for columnname
+
+            COMMIT;
+        END IF; -- unq_digs
+      END LOOP; -- for pan
     END LOOP; -- for rowctid
     qry := format('INSERT INTO %s (id, createdatetime, tablename, value, row_id) values (default, now(), ''%s'', ''%s'', null)', progress_table, tablename, 'COMPLETED');
     EXECUTE qry;
